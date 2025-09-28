@@ -1,4 +1,11 @@
 import streamlit as st
+from rembg import remove
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from io import BytesIO
+import zipfile
+import os
+import numpy as np
+from streamlit_drawable_canvas import st_canvas
 
 # --- Password protection ---
 PASSWORD = "shreshthvig"
@@ -14,16 +21,6 @@ if not st.session_state.logged_in:
     else:
         st.warning("Incorrect password!")
         st.stop()
-
-
-import streamlit as st
-from rembg import remove
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from io import BytesIO
-import zipfile
-import os
-import numpy as np
-from streamlit_drawable_canvas import st_canvas
 
 # --- Page setup ---
 st.set_page_config(page_title="Bulk Background Editor", layout="wide")
@@ -41,6 +38,13 @@ font_size_percent = st.sidebar.slider("Font size (% of image height)", 2, 30, 4)
 
 st.sidebar.header("Refine Settings")
 brush_size = st.sidebar.slider("Brush size (px)", 5, 100, 20)
+
+st.sidebar.header("Drop Shadow Settings")
+shadow_offset_x = st.sidebar.slider("Shadow offset X", -100, 100, 20)
+shadow_offset_y = st.sidebar.slider("Shadow offset Y", -100, 100, 20)
+shadow_blur = st.sidebar.slider("Shadow blur radius", 0, 100, 30)
+shadow_opacity = st.sidebar.slider("Shadow opacity", 0, 255, 0)
+shadow_color = st.sidebar.color_picker("Shadow color", "#000000")
 
 # --- Upload images ---
 uploaded_files = st.file_uploader("Upload images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
@@ -102,8 +106,14 @@ if uploaded_files:
             input_image.save(img_bytes, format="PNG")
             no_bg = Image.open(BytesIO(remove(img_bytes.getvalue()))).convert("RGBA")
 
-            # Add shadow
-            no_bg = add_shadow(no_bg)
+            # Add shadow with user settings
+            rgb_shadow = tuple(int(shadow_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            no_bg = add_shadow(
+                no_bg,
+                offset=(shadow_offset_x, shadow_offset_y),
+                blur_radius=shadow_blur,
+                shadow_color=rgb_shadow + (shadow_opacity,)
+            )
 
             # Background (color or image)
             if bg_image:
@@ -153,20 +163,23 @@ if uploaded_files:
 
         # Init refine state
         if filename not in st.session_state.refine_state:
-            st.session_state.refine_state[filename] = False
+            st.session_state.refine_state[filename] = None  # None = no refine, "add" = restore, "erase" = remove
 
-        # Refine / Close buttons
-        col1_btn, col2_btn = st.columns([1, 1])
+        # Refine buttons
+        col1_btn, col2_btn, col3_btn = st.columns([1, 1, 1])
         with col1_btn:
-            if st.button(f"Refine {filename}", key=f"refine_btn_{idx}"):
-                st.session_state.refine_state[filename] = True
+            if st.button(f"Restore Parts {filename}", key=f"restore_btn_{idx}"):
+                st.session_state.refine_state[filename] = "add"
         with col2_btn:
+            if st.button(f"Erase Parts {filename}", key=f"erase_btn_{idx}"):
+                st.session_state.refine_state[filename] = "erase"
+        with col3_btn:
             if st.button(f"Close Refine {filename}", key=f"close_refine_btn_{idx}"):
-                st.session_state.refine_state[filename] = False
+                st.session_state.refine_state[filename] = None
 
         # Show refine canvas
-        if st.session_state.refine_state[filename]:
-            st.write("**Use the brush to restore removed areas:**")
+        if st.session_state.refine_state[filename] in ["add", "erase"]:
+            st.write("**Use the brush below:**")
 
             # Resize canvas for screen
             max_canvas_width = 800
@@ -174,7 +187,10 @@ if uploaded_files:
             canvas_width = int(final_img.width * scale_ratio)
             canvas_height = int(final_img.height * scale_ratio)
 
-            canvas_bg = final_img.convert("RGB").resize((canvas_width, canvas_height))
+            if st.session_state.refine_state[filename] == "add":
+                canvas_bg = final_img.convert("RGB").resize((canvas_width, canvas_height))
+            else:  # erase mode
+                canvas_bg = final_img.convert("RGB").resize((canvas_width, canvas_height))
 
             canvas_result = st_canvas(
                 fill_color="rgba(0,0,0,0)",
@@ -203,9 +219,18 @@ if uploaded_files:
                     final_array = np.array(st.session_state.processed_images[filename])
                     input_array = np.array(input_image)
 
-                    # Ensure mask fits correctly
-                    if mask.shape == final_array.shape[:2]:
+                    if st.session_state.refine_state[filename] == "add":
+                        # Restore from original input
                         final_array[mask] = input_array[mask]
+                    elif st.session_state.refine_state[filename] == "erase":
+                        # Replace with background
+                        if bg_image:
+                            bg_resized = bg_image.resize(final_img.size)
+                        else:
+                            rgb = tuple(int(bg_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+                            bg_resized = Image.new("RGBA", final_img.size, rgb + (255,))
+                        bg_array = np.array(bg_resized)
+                        final_array[mask] = bg_array[mask]
 
                     st.session_state.processed_images[filename] = Image.fromarray(final_array)
                     st.success(f"{filename} edits applied!")
